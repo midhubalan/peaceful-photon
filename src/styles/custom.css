@@ -1,0 +1,27 @@
+/* Bold accent palette, overriding Starlight's defaults. */
+:root {
+	--sl-color-accent-low: #2a0f45;
+	--sl-color-accent: #7c3aed;
+	--sl-color-accent-high: #d9c7fb;
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #ecdcff;
+	--sl-color-accent: #6d28d9;
+	--sl-color-accent-high: #2a0f45;
+}
+
+/* Punchier hero title: bigger, bolder, with a gradient wash. */
+.hero h1 {
+	font-weight: 800;
+	letter-spacing: -0.02em;
+	background: linear-gradient(135deg, #7c3aed 0%, #ec4899 100%);
+	background-clip: text;
+	-webkit-background-clip: text;
+	color: transparent;
+}
+
+.hero .tagline {
+	font-weight: 500;
+	font-size: clamp(1.1rem, 2vw, 1.5rem);
+}

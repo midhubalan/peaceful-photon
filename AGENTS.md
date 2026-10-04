@@ -28,9 +28,9 @@ an unrelated existing one.
   to WSL) rather than burying them in prose.
 - Prefer concrete, copy-pasteable commands with `title="..."` on code fences
   explaining what the command does, over abstract descriptions.
-- Delete `src/content/docs/guides/example.md` and
-  `src/content/docs/reference/example.md` once they're no longer useful as
-  templates — don't let placeholder content linger.
+- Include `lastUpdated: <YYYY-MM-DD>` in frontmatter so readers can judge how
+  stale a guide's steps might be. Bump it whenever the guide's steps are
+  materially revised, not on trivial wording tweaks.
 
 ## Development
 

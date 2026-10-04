@@ -1,40 +1,40 @@
 ---
-title: Welcome to Starlight
-description: Get started building your docs site with Starlight.
-template: splash # Remove or comment out this line to display the site sidebar on this page.
+title: Peaceful Photon
+description: A personal knowledge base of how-to guides and deep dives on toolchains, languages, dev environments, AI harnesses, cloud, Kubernetes, and agile.
+template: splash
 hero:
-  tagline: Congrats on setting up a new Starlight project!
-  image:
-    file: ../../assets/houston.webp
+  tagline: Stuff I had to figure out, written down so I never have to figure it out twice.
   actions:
-    - text: Example Guide
-      link: /guides/example/
+    - text: Browse the guides
+      link: /guides/postgresql-local-setup/
       icon: right-arrow
-    - text: Read the Starlight docs
-      link: https://starlight.astro.build
+    - text: View on GitHub
+      link: https://github.com/midhubalan/peaceful-photon
       icon: external
       variant: minimal
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-## Next steps
+## What's in here
 
 <CardGrid stagger>
-	<Card title="Update content" icon="pencil">
-		Edit `src/content/docs/index.mdx` to see this page change.
+	<Card title="Toolchain & environment" icon="setting">
+		Getting local setups — databases, package managers, shells, WSL — working the way they're supposed to.
 	</Card>
-	<Card title="Change page layout" icon="document">
-		Delete `template: splash` in `src/content/docs/index.mdx` to display a
-		sidebar on this page.
+	<Card title="Languages & frameworks" icon="document">
+		Notes on the languages and frameworks in active use, past the "getting started" tutorial stage.
 	</Card>
-	<Card title="Add new content" icon="add-document">
-		Add Markdown or MDX files to `src/content/docs` to create new pages.
+	<Card title="AI harnesses" icon="rocket">
+		Working notes on agent tooling and AI-assisted development workflows.
 	</Card>
-	<Card title="Configure your site" icon="setting">
-		Edit your `sidebar` and other config in `astro.config.mjs`.
+	<Card title="Cloud & Kubernetes" icon="puzzle">
+		Infrastructure setup, cluster config, and the cloud-platform details worth not re-learning.
 	</Card>
-	<Card title="Read the docs" icon="open-book">
-		Learn more in [the Starlight Docs](https://starlight.astro.build/).
+	<Card title="Agile project management" icon="notes">
+		How work actually gets planned and tracked, as opposed to how the textbook says it should.
 	</Card>
 </CardGrid>
+
+Every guide carries a **last updated** date — setup steps rot as tools move,
+so check the date before trusting a command blindly.

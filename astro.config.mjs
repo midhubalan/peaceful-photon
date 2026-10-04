@@ -6,14 +6,14 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
 	integrations: [
 		starlight({
-			title: 'My Docs',
-			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/withastro/starlight' }],
+			title: 'Peaceful Photon',
+			customCss: ['./src/styles/custom.css'],
+			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/midhubalan/peaceful-photon' }],
 			sidebar: [
 				{
 					label: 'Guides',
 					items: [
 						// Each item here is one entry in the navigation menu.
-						{ label: 'Example Guide', slug: 'guides/example' },
 						{ label: 'Posgres Setup Guide', slug: 'guides/postgresql-local-setup' },
 						{ label: 'Neo4j Setup Guide', slug: 'guides/neo4j-community-local-setup' },
 						{ label: 'WSL Keyring Setup Guide', slug: 'guides/wsl-keyring-setup' },
