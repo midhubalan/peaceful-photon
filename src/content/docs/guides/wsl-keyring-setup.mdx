@@ -1,0 +1,308 @@
+---
+title: Make the Linux keyring work in WSL
+description: Fix "locked collection" and "cannot open display" keyring errors in WSL on RHEL 10 and Ubuntu, without a login session or a desktop.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Some tools store secrets in the Linux keyring instead of a plain file. In WSL that often fails, because WSL logs you in automatically and **nothing ever unlocks the keyring**. This guide explains why, then gets a working keyring on **RHEL 10** or **Ubuntu** using only the terminal.
+
+:::note[Verification status]
+The keyring behaviour in this guide was tested on Ubuntu 24.04 (gnome-keyring 46.1) in a container with a session bus and no display, which is the same situation as WSL without a desktop. RHEL 10 package names were checked against the AlmaLinux 10.2 and CentOS Stream 10 package metadata. The steps have not been run on a live RHEL 10 WSL instance. Delete this note once you have done that.
+:::
+
+## The symptoms
+
+You will see one of these, usually from a tool that stores a token or password:
+
+```text
+secret-tool: Cannot create an item in a locked collection
+secret-tool: Object does not exist at path "/org/freedesktop/secrets/collection/login"
+couldn't create system prompt: GDBus.Error:org.freedesktop.DBus.Error.Spawn.ChildExited
+gcr-prompter: Gtk-WARNING: cannot open display
+```
+
+A fifth symptom is quieter: the **first command of a session stalls for up to about 50 seconds**, then carries on. Microsoft's credential-provider team documents this for WSL. The token cache waits for a locked keyring to answer, and D-Bus activation times out before the tool falls back to a plain-text cache.
+
+### Which tools need this
+
+Anything built on `libsecret` does. In the Microsoft ecosystem, MSAL-based tools encrypt their token cache this way on Linux, and the Azure CLI uses MSAL. The `microsoft/postgres-skills` README does not mention a keyring, but it relies on the Azure CLI for Azure resources, so that is the likely path. Other common users are `git-credential-libsecret` and Python's `keyring` library.
+
+## How the pieces fit together
+
+| Piece | What it is | RHEL 10 package | Ubuntu package |
+|---|---|---|---|
+| **Secret Service** | The D-Bus API (`org.freedesktop.secrets`) that apps talk to | n/a | n/a |
+| **gnome-keyring-daemon** | The program that implements the Secret Service and holds the encrypted keyring | `gnome-keyring` | `gnome-keyring` |
+| **libsecret** | The client library apps link against, plus the `secret-tool` command | `libsecret` | `libsecret-tools` |
+| **Session bus** | The per-user D-Bus message bus that connects apps to the daemon | `dbus-daemon` | `dbus-user-session` |
+| **The login keyring** | An encrypted file, `~/.local/share/keyrings/login.keyring`, protected by a password | n/a | n/a |
+| **Prompter** | A GUI dialog (`gcr-prompter`) the daemon opens to ask for that password | pulled in automatically as `gcr3` | pulled in automatically (`gcr4` on 24.04) |
+
+On a normal desktop, logging in unlocks the login keyring because the login password is passed to the daemon by PAM. WSL skips that step, so the daemon starts **locked**. The daemon then tries to ask you through the GUI prompter, which fails when there is no display. That is the whole problem.
+
+The fix is to hand the daemon the password yourself, from a terminal, using its `--unlock` option. That is what this guide sets up.
+
+## What Microsoft's WSL page gets wrong for RHEL
+
+Microsoft's "MSAL.NET with WSL" page is the source most people find first. Its **Red Hat Enterprise Linux** tab runs this:
+
+```bash
+sudo dnf install libx11-6 libc++1 libc++abi1 libsecret-1-0 libwebkit2gtk-4.1-37 -y
+```
+
+Those are **Debian/Ubuntu package names**. None of them exist on RHEL, so the command fails. The page's keyring-setup steps also give only the Debian command (`apt install seahorse`). Its extra packages are for the .NET sign-in broker, not for the keyring: the page itself says `libx11` is used to get the console window handle and that `libwebkit2gtk` is required by MSAL's native interop. For keyring access you need far less, as the next section shows.
+
+The page does get one thing right, and it applies to everything below: **install the packages, restart WSL, then configure the keyring**. Doing it in another order can leave the keyring half-configured.
+
+## Do I need webkitgtk?
+
+No. Neither `webkitgtk6.0-devel` nor `libsecret-devel` is a keyring:
+
+- `libsecret-devel` installs `libsecret` (the client library and `secret-tool`) plus build headers. `libsecret` does **not** depend on `gnome-keyring`, so on its own it gives you a client with nothing to talk to.
+- `webkitgtk6.0-devel` is a web-rendering toolkit with headers. It is unrelated to secret storage.
+
+A fair theory is that the WebKit packages were what made **Seahorse** (the GUI keyring manager) run under WSLg. The package metadata does not support that directly. `seahorse-43.0-10.el10` (AlmaLinux 10.2 and CentOS Stream 10) requires GTK 3, libhandy, gcr3, libgpgme, libsoup3, libpwquality, libsecret and a pinentry (`pinentry-gui`), and **nothing from WebKit**. `dnf` installs all of those by itself when you install `seahorse`.
+
+If Seahorse really only started after the WebKit install, the fix came from something it does not list as a requirement. The usual suspects for a GUI app on a minimal image are unlisted runtime pieces such as fonts, an icon theme, graphics libraries, or XKB keyboard data, but that is a guess until you compare the two package lists. Everything in the terminal route below needs none of them.
+
+To see what your machine actually has:
+
+```bash frame="terminal" title="RHEL 10"
+rpm -q gnome-keyring libsecret gcr3 dbus-daemon
+sudo dnf history list                 # find the transaction where you installed them
+sudo dnf history info <id>            # shows every package that transaction pulled in
+```
+
+To prove the minimal set on your own hardware, test on a throwaway copy before removing anything:
+
+```powershell title="Windows PowerShell"
+wsl --export <YourDistro> C:\temp\clone.tar
+wsl --import keyring-test C:\wsl\keyring-test C:\temp\clone.tar
+```
+
+Then follow this guide in `keyring-test` from a clean state. If it works there without the `-devel` packages, you can remove them from your real instance. Check what `sudo dnf remove` proposes before you confirm.
+
+To settle the Seahorse question, run this in the clone. It prints everything `seahorse` alone would install, and answers "no" at the prompt so nothing is installed:
+
+```bash frame="terminal" title="RHEL 10 clone"
+sudo dnf install --assumeno seahorse
+```
+
+Compare that list with the output of `sudo dnf history info <id>` from your real instance. Packages that appear only in the WebKit transaction are the candidates for what Seahorse was missing. Install them one group at a time in the clone until `seahorse` starts, and you will know the real minimal set.
+
+## 1. Check WSL itself
+
+You need WSL 2 with systemd enabled. This also gives you a per-user session bus, which the keyring needs.
+
+```ini title="/etc/wsl.conf"
+[boot]
+systemd=true
+```
+
+```powershell title="Windows PowerShell"
+wsl --update
+wsl --shutdown
+```
+
+After reopening your distro, confirm a session bus exists:
+
+```bash frame="terminal"
+echo "$DBUS_SESSION_BUS_ADDRESS"
+ls -l "/run/user/$(id -u)/bus"
+```
+
+If the variable is empty but the socket file exists, that is fine: the helper script below sets the variable for you. If neither exists, see [Without systemd](#without-systemd).
+
+## 2. Install the packages
+
+<Tabs syncKey="distro">
+  <TabItem label="RHEL">
+    ```bash frame="terminal" title="RHEL 10"
+    sudo dnf install -y gnome-keyring libsecret dbus-daemon
+    ```
+
+    `gnome-keyring` depends on `gcr3` and pulls it in automatically. You do not need to name it.
+  </TabItem>
+  <TabItem label="Ubuntu / Debian">
+    ```bash frame="terminal" title="Ubuntu / Debian"
+    sudo apt update
+    sudo apt install -y gnome-keyring libsecret-tools dbus-user-session
+    ```
+  </TabItem>
+</Tabs>
+
+Now restart WSL so the new D-Bus service files are picked up:
+
+```powershell title="Windows PowerShell"
+wsl --shutdown
+```
+
+## 3. Add the helper script
+
+Save this as `~/.config/keyring-helpers.sh`. It defines two functions: one to test whether the keyring is locked, and one to unlock it.
+
+```bash title="~/.config/keyring-helpers.sh" {28,31-34}
+# Make sure the user session bus is reachable. Only sets the variable if it
+# is missing and the systemd user bus socket exists.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "/run/user/$(id -u)/bus" ]; then
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
+fi
+
+# Succeeds (exit 0) when the default keyring is locked, missing, or unreachable.
+# Asking the bus also starts the daemon if it is not already running.
+keyring_locked() {
+  local out
+  out=$(busctl --user get-property org.freedesktop.secrets \
+        /org/freedesktop/secrets/aliases/default \
+        org.freedesktop.Secret.Collection Locked 2>/dev/null) || return 0
+  [ "$out" != "b false" ]
+}
+
+# Unlocks the login keyring. On first use it creates the keyring and the
+# password you type becomes its password.
+keyring-unlock() {
+  local pw
+  if [ -t 0 ]; then
+    read -rs -p "Keyring password: " pw; echo
+  else
+    IFS= read -r pw
+  fi
+  # --replace is essential: without it, an already-running locked daemon
+  # (started by the first app that touched the keyring) is left locked.
+  printf '%s' "$pw" | gnome-keyring-daemon --replace --unlock --components=secrets >/dev/null 2>&1
+  unset pw
+  # A wrong password fails silently, so always verify.
+  if keyring_locked; then
+    echo "Keyring is still locked (wrong password?)" >&2
+    return 1
+  fi
+}
+```
+
+Load it from your shell startup file and prompt once per session:
+
+```bash title="~/.bashrc"
+[ -f ~/.config/keyring-helpers.sh ] && . ~/.config/keyring-helpers.sh
+
+# In an interactive shell, ask for the keyring password only if it is locked.
+if [[ $- == *i* ]] && keyring_locked; then
+  echo "Login keyring is locked."
+  keyring-unlock
+fi
+```
+
+:::caution[Never put the keyring password in a file]
+It is tempting to pipe a stored password into `keyring-unlock` so nothing prompts. That removes the protection the keyring exists to provide. Type it once per WSL session.
+:::
+
+## 4. First-time setup
+
+Open a new terminal. The `.bashrc` snippet runs and asks for a password. **The password you type now becomes the keyring password**, because no `login` keyring exists yet.
+
+```text
+Login keyring is locked.
+Keyring password: 
+```
+
+Then test that secrets can be written and read back:
+
+```bash frame="terminal"
+printf '%s' 'test-secret' | secret-tool store --label='keyring test' service keyring-test account me
+secret-tool lookup service keyring-test account me      # prints: test-secret
+secret-tool clear service keyring-test account me       # remove the test entry
+```
+
+If the lookup prints `test-secret`, the keyring works. Run your real tool next, for example `az login`.
+
+## 5. Day-to-day
+
+- **Opening WSL:** you are asked for the keyring password once, in the first interactive shell.
+- **More terminals in the same session:** no prompt. The keyring is already unlocked.
+- **After WSL stops** (`wsl --shutdown`, a Windows restart, or WSL shutting down an idle VM): the daemon is gone and the keyring is locked again. Your secrets are safe in `login.keyring`. Unlock again at the next prompt.
+- **Locking on demand:** `wsl --shutdown`, or stop just the daemon with `pkill -u "$USER" gnome-keyring-d`. The next tool that needs the keyring starts a fresh, locked daemon.
+
+:::note[What the keyring does and does not protect]
+The keyring encrypts your secrets **at rest**. Once unlocked, any program running as your user can read them. That is the same trust model as a normal Linux desktop, and it is a real improvement over secrets in plain files.
+:::
+
+## Alternative: the GUI route (WSLg)
+
+If you have WSLg (Windows 11, or Windows 10 with the Store version of WSL), the daemon can show its own password dialog, so you do not need the helper script. Microsoft's page uses this route with Seahorse:
+
+<Tabs syncKey="distro">
+  <TabItem label="RHEL">
+    ```bash frame="terminal" title="RHEL 10"
+    sudo dnf install -y seahorse
+    seahorse        # run as your normal user, not with sudo
+    ```
+  </TabItem>
+  <TabItem label="Ubuntu / Debian">
+    ```bash frame="terminal" title="Ubuntu / Debian"
+    sudo apt install -y seahorse
+    seahorse        # run as your normal user, not with sudo
+    ```
+  </TabItem>
+</Tabs>
+
+In Seahorse, press **+**, create a **Password** keyring named exactly `login`, and set its password. Run `wsl --shutdown`, reopen WSL, and the first tool that needs the keyring should open a password dialog.
+
+The terminal route above is more reliable for team use, because it also works over SSH, in Windows Terminal without WSLg, and in scripts.
+
+:::note[RHEL 10: if Seahorse will not start]
+Seahorse itself does not depend on WebKit (see [Do I need webkitgtk?](#do-i-need-webkitgtk)). If it fails on a minimal RHEL image, first check that WSLg is running (`echo "$WAYLAND_DISPLAY $DISPLAY"` should print something) and read the error `seahorse` prints in the terminal. Missing fonts, icon themes or graphics libraries are the likeliest causes. Use the clone test in that section to find the exact missing package instead of installing a whole web-rendering toolkit.
+:::
+
+## Without systemd
+
+If you cannot enable systemd, there is no user session bus to attach to. You can start a private one per shell instead:
+
+```bash title="~/.bashrc (fallback only)"
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+  exec dbus-run-session -- "$SHELL"
+fi
+```
+
+This has real costs. Every terminal gets its own bus and its own daemon, so **each terminal asks for the password**. Tools started from one terminal cannot share secrets with another. Prefer enabling systemd.
+
+## If you would rather not use a keyring
+
+The Azure CLI has an **experimental** setting that turns off token-cache encryption:
+
+```bash frame="terminal"
+az config set core.encrypt_token_cache=false
+```
+
+The cost is that tokens are then stored unencrypted in `~/.azure`. Treat this as a last resort, not a team default.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Cannot create an item in a locked collection` | Keyring is locked | Run `keyring-unlock` |
+| `Object does not exist at path ".../collection/login"` | No `login` keyring exists yet | Run `keyring-unlock`. It creates the keyring. |
+| `couldn't create system prompt` or `cannot open display` | The daemon wants a GUI dialog and there is no display | Unlock from the terminal with `keyring-unlock`, or use the WSLg route |
+| `Keyring is still locked (wrong password?)` | Wrong password. `--unlock` gives no error of its own. | Try again. If you have forgotten it, see below. |
+| Plain `gnome-keyring-daemon --unlock` does nothing | It does not take over a daemon that an app already started | Use `--replace --unlock`, as the helper does |
+| First command stalls about 50 seconds | Tool waited on a locked keyring until D-Bus activation timed out | Unlock first. Microsoft's listed workaround is `wsl --shutdown`, then reopen. |
+| `Failed to connect to bus` | No session bus: systemd off, or `DBUS_SESSION_BUS_ADDRESS` unset | Step 1, or [Without systemd](#without-systemd) |
+| `busctl: command not found` | `busctl` ships with the `systemd` package | Install `systemd`, and enable it in `/etc/wsl.conf` |
+| Works until WSL restarts, then fails again | Expected. The daemon stops and the keyring relocks. | Unlock at the next prompt. |
+
+### Forgotten the keyring password
+
+There is no recovery. The only reset is to delete the keyring file, which **destroys everything stored in it**. Tools will then ask you to sign in again.
+
+```bash frame="terminal"
+pkill -u "$USER" gnome-keyring-d          # stop the daemon first, so it cannot write the file back
+rm ~/.local/share/keyrings/login.keyring
+keyring-unlock                            # creates a new keyring with the password you type
+```
+
+## Quick reference
+
+```bash frame="terminal" title="Everyday commands"
+keyring_locked && echo locked || echo unlocked
+keyring-unlock
+secret-tool lookup service <name> account <name>
+```

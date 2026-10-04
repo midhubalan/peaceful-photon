@@ -1,0 +1,456 @@
+---
+title: Set up Neo4j Community Edition on a workstation
+description: Run Neo4j Community Edition in a container with APOC enabled, understand its one-database and no-roles limits, and connect to it from the agent harness.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+This guide gets a local Neo4j Community Edition (CE) server running on a workstation (native Linux or WSL) with the **APOC** plugin enabled. It recommends **a container** over a native install, because CE needs a small "dance" to enable APOC and the container image does most of it for you. The manual native steps are in an appendix at the end. Step 7 covers Neo4j's own agent skills and the CLI that installs them into your harness.
+
+If you have read the PostgreSQL setup guide, the table below shows how the concepts map. Several things you did there **do not exist in CE**, and it is better to find that out now.
+
+| PostgreSQL guide | Neo4j Community Edition |
+|---|---|
+| Many databases per server | **One** user database (`neo4j`), plus an internal `system` database. `CREATE DATABASE` is rejected. |
+| Roles and `GRANT` | **No roles.** You can create extra users, but every user has implied administrator rights. |
+| Read-only role for the agent | **No equivalent.** See [step 8](#8-connect-the-agent-harness-and-the-read-only-gap). |
+| The Postgres skill in the harness | Neo4j publishes agent skills, and a CLI (`neo4j-cli`) that installs them. See [step 7](#7-install-the-neo4j-cli-and-agent-skills). |
+| `postgresql.conf` and `pg_hba.conf` | One `neo4j.conf` (plus `apoc.conf` for APOC settings), or environment variables when using a container |
+| `CREATE EXTENSION` | A plugin: a **jar file** in the plugins folder, **plus** a permission in config, **plus** a restart |
+
+## Before you start: things called "neo4j"
+
+As with Postgres, several different things share one name:
+
+| Name | What it is |
+|---|---|
+| Database `neo4j` | The default (and in CE, the only) user database. Your data lives here. |
+| Database `system` | Internal database that stores users and settings. Administration commands run against it. |
+| User `neo4j` | The built-in login. In CE it is the account you will use for everything. |
+| OS user `neo4j` | The Linux account the server process runs as (inside the container, or on the host for a native install). |
+
+:::note[The APOC "dance" has two halves]
+APOC is not enabled by one switch. You need **both**:
+
+1. The **jar file** in the plugins folder (Neo4j ships APOC Core in a separate `labs` folder, so it has to be copied across).
+2. A **config setting** that allows APOC to use internal APIs: `dbms.security.procedures.unrestricted=apoc.*`.
+
+Then restart. Miss either half and `RETURN apoc.version()` fails. Every method below is just a different way of doing these two things.
+:::
+
+## 1. Why a container
+
+- **Configuration without editing files.** Any `neo4j.conf` setting can be passed as an environment variable.
+- **APOC handled for you.** The image can install the jar itself.
+- **Disposable.** Delete the container and rerun the script. Your data survives in a host folder.
+- **Version pinning.** Neo4j now uses calendar versions (`YYYY.MM.patch`) and the APOC jar must match your Neo4j version exactly. The image tag pins both.
+
+## 2. Install a container engine
+
+You need either Docker or Podman. Both accept the same commands below.
+
+<Tabs syncKey="distro">
+  <TabItem label="RHEL">
+    ```bash frame="terminal" title="RHEL: Podman is the native choice"
+    sudo dnf install -y podman
+
+    # The script in step 3 reads this variable to pick the engine.
+    echo 'export ENGINE=podman' >> ~/.bashrc && source ~/.bashrc
+    ```
+
+    :::tip
+    RHEL runs SELinux in enforcing mode. Bind-mounted folders need a `:Z` suffix or the container gets "permission denied". The script in step 3 adds it automatically when SELinux is enforcing.
+    :::
+  </TabItem>
+  <TabItem label="Ubuntu / Debian">
+    ```bash frame="terminal" title="Ubuntu / Debian: Docker Engine"
+    sudo apt update
+    sudo apt install -y docker.io
+
+    # Let your user run docker without sudo, then log out and back in.
+    sudo usermod -aG docker "$USER"
+    ```
+
+    If you prefer Docker's own repository packages over `docker.io`, follow Docker's install guide for your distro.
+  </TabItem>
+</Tabs>
+
+:::caution[WSL]
+Either install the engine inside your WSL distro (with systemd enabled, as in the PostgreSQL guide), or use Docker Desktop with WSL integration turned on. Keep the data folders on the **Linux** filesystem (for example under `$HOME`), not under `/mnt/c`, or performance and file permissions will be poor.
+:::
+
+## 3. Run Neo4j with APOC
+
+Save this as `neo4j-ce.sh`. Every line is annotated.
+
+```bash title="neo4j-ce.sh" {5,8,22,27-28}
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- Settings you may change ----------------------------------------------
+NEO4J_VERSION="2026.09.0"    # PIN THIS. Check Docker Hub for the current tag.
+NAME="neo4j-ce"
+BASE="$HOME/neo4j"           # host folders that survive container removal
+ENGINE="${ENGINE:-docker}"   # set ENGINE=podman on RHEL
+: "${NEO4J_PASSWORD:?Set NEO4J_PASSWORD first (minimum 8 characters)}"
+
+# --- Housekeeping ---------------------------------------------------------
+# data    = the database files        logs    = server logs
+# plugins = APOC and other jars       import  = files LOAD CSV can read
+mkdir -p "$BASE"/{data,logs,plugins,import}
+
+# SELinux (RHEL) needs :Z on bind mounts. Other distros: leave empty.
+Z=""
+if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" = "Enforcing" ]; then Z=":Z"; fi
+
+# Run as YOUR user so the files in $BASE stay yours (no sudo to copy a jar).
+USERFLAGS=(--user "$(id -u):$(id -g)")
+if [ "$ENGINE" = "podman" ]; then USERFLAGS=(--userns=keep-id "${USERFLAGS[@]}"); fi
+
+"$ENGINE" run --detach --name "$NAME" --restart unless-stopped \
+  "${USERFLAGS[@]}" \
+  `# Bind to localhost only: 7474 = Browser UI, 7687 = Bolt (drivers, agents)` \
+  --publish 127.0.0.1:7474:7474 --publish 127.0.0.1:7687:7687 \
+  --volume "$BASE/data:/data$Z" \
+  --volume "$BASE/logs:/logs$Z" \
+  --volume "$BASE/plugins:/plugins$Z" \
+  --volume "$BASE/import:/var/lib/neo4j/import$Z" \
+  `# First start only: sets the password for the built-in neo4j user` \
+  --env NEO4J_AUTH="neo4j/${NEO4J_PASSWORD}" \
+  `# Half 1 of the APOC dance: install the jar (dev convenience, see below)` \
+  --env NEO4J_PLUGINS='["apoc"]' \
+  `# Half 2 of the APOC dance: allow APOC to use internal APIs` \
+  --env NEO4J_dbms_security_procedures_unrestricted='apoc.*' \
+  "neo4j:${NEO4J_VERSION}"
+```
+
+Run it. Take care with the password: `read -rs` keeps it out of your shell history.
+
+```bash frame="terminal"
+read -rs -p "Neo4j password (8+ chars): " NEO4J_PASSWORD; export NEO4J_PASSWORD; echo
+bash neo4j-ce.sh
+```
+
+### How the environment variables map to `neo4j.conf`
+
+The image turns environment variables into config settings with three rules:
+
+1. Prefix the setting with `NEO4J_`.
+2. Write each existing underscore **twice** (`_` becomes `__`).
+3. Replace each period with a single underscore.
+
+| `neo4j.conf` setting | Environment variable |
+|---|---|
+| `dbms.security.procedures.unrestricted` | `NEO4J_dbms_security_procedures_unrestricted` |
+| `server.memory.heap.max_size` | `NEO4J_server_memory_heap_max__size` |
+| `apoc.import.file.use_neo4j_config` | `NEO4J_apoc_import_file_use__neo4j__config` |
+
+Environment variables win over any config file you mount at `/conf`.
+
+:::tip[RHEL-flavoured image]
+Community tags have no suffix (`neo4j:2026.09.0`). A UBI9 variant (`neo4j:2026.09.0-ubi9`) exists if you want a Red Hat base image. Check the tag list on Docker Hub.
+:::
+
+### The auto-install helper is for development
+
+The `NEO4J_PLUGINS` helper is convenient, but Neo4j's docs call it a development feature and not recommended for production. Because the script also mounts `/plugins`, the helper **saves the jar into `$BASE/plugins`**, and later runs can reuse it. To switch to a pinned, repeatable setup:
+
+```bash frame="terminal"
+ls "$BASE/plugins"        # you should see apoc.jar (or apoc-<version>-core.jar)
+
+# Optional: fetch the exact jar yourself instead. The version MUST match Neo4j.
+curl -fL -o "$BASE/plugins/apoc-${NEO4J_VERSION}-core.jar" \
+  "https://github.com/neo4j/apoc/releases/download/${NEO4J_VERSION}/apoc-${NEO4J_VERSION}-core.jar"
+```
+
+Then delete the `NEO4J_PLUGINS` line from the script. Keep the `unrestricted` line, since that is config rather than the jar.
+
+## 4. Verify
+
+```bash frame="terminal"
+"${ENGINE:-docker}" logs -f neo4j-ce     # wait for "Started." then Ctrl+C
+
+# cypher-shell prompts for the password
+"${ENGINE:-docker}" exec -it neo4j-ce cypher-shell -u neo4j "RETURN apoc.version();"
+```
+
+A version string means both halves of the dance worked. You can also open `http://localhost:7474` in a browser and connect to `bolt://localhost:7687` as `neo4j`.
+
+## 5. Day-to-day
+
+```bash frame="terminal"
+"${ENGINE:-docker}" stop neo4j-ce         # stop (data stays in ~/neo4j/data)
+"${ENGINE:-docker}" start neo4j-ce
+"${ENGINE:-docker}" rm -f neo4j-ce        # remove the container, keep the data
+```
+
+:::caution[The password is set once]
+`NEO4J_AUTH` only takes effect when `data/` is empty. If you change it later, or rerun the script with a different value against existing data, **nothing changes**. Change the password from inside:
+
+```cypher
+ALTER CURRENT USER SET PASSWORD FROM 'old-password' TO 'new-password';
+```
+
+To start completely fresh, remove the container and delete `~/neo4j/data`. This destroys your graph.
+:::
+
+**Upgrading.** Change `NEO4J_VERSION`, but first stop the container and take an offline dump, because a version jump can require a store migration and the APOC jar must match the new version:
+
+```bash frame="terminal"
+mkdir -p ~/neo4j/backups
+"${ENGINE:-docker}" run --rm --user "$(id -u):$(id -g)" \
+  --volume ~/neo4j/data:/data --volume ~/neo4j/backups:/backups \
+  "neo4j:${NEO4J_VERSION}" neo4j-admin database dump neo4j --to-path=/backups
+```
+
+On RHEL with SELinux enforcing, add `:Z` to both `--volume` options, as in the script. Read Neo4j's upgrade notes for your target version before switching.
+
+## 6. Tune the configuration
+
+The container's defaults are meant for learning. The most common change is memory, passed the same way as any other setting:
+
+```bash
+  --env NEO4J_server_memory_heap_max__size=2G \
+  --env NEO4J_server_memory_pagecache_size=1G \
+```
+
+Add lines like these to the `run` command in the script, then remove and recreate the container. Config is applied at startup, so **editing the script alone does nothing** until you recreate.
+
+APOC has its own settings, for example file import and export, which are **off by default** for safety. In Neo4j 5 and later these belong in `apoc.conf`, not `neo4j.conf`. In a container, pass them as environment variables:
+
+```bash
+  --env NEO4J_apoc_export_file_enabled=true \
+  --env NEO4J_apoc_import_file_enabled=true \
+```
+
+Enable only what you need.
+
+:::note[Optional hardening]
+`dbms.security.procedures.allowlist` limits which plugin procedures load. Its default loads all of them. If you set it, list every package you need (for example `apoc.*`), or the others disappear.
+:::
+
+## 7. Install the Neo4j CLI and agent skills
+
+Neo4j publishes **agent skills**: knowledge packages that teach a coding agent current Cypher, driver and admin patterns. It also publishes a command-line tool, `neo4j-cli`, that installs those skills into popular agent harnesses in one step. This is the Neo4j counterpart of the Postgres skill from the other guide.
+
+:::caution[This is a Labs project]
+`neo4j-cli` lives in the `neo4j-labs` GitHub organisation, and Neo4j's own skills docs describe the unified CLI as a preview. Commands and flags can change between releases. Pin the version your team uses, and run `neo4j-cli --help` if something here no longer matches.
+:::
+
+### Install the CLI
+
+Pick one method.
+
+<Tabs syncKey="cli-install">
+  <TabItem label="pipx / uv">
+    ```bash frame="terminal"
+    pipx install neo4j-cli
+    # or
+    uv tool install neo4j-cli
+    ```
+  </TabItem>
+  <TabItem label="npm">
+    ```bash frame="terminal"
+    npm i -g @neo4j-labs/cli
+    ```
+  </TabItem>
+  <TabItem label="Install script">
+    ```bash frame="terminal"
+    curl -sSfL https://neo4j.sh/install.sh | bash
+    ```
+
+    If your team's policy is not to pipe a download into a shell, fetch the script first and read it, or use one of the package-manager methods instead.
+  </TabItem>
+</Tabs>
+
+Check that it works:
+
+```bash frame="terminal"
+neo4j-cli --help
+```
+
+The installers can also install the agent-skill bundle for you. In an interactive terminal the install script asks. For unattended installs, set `NEO4J_CLI_AUTO_INSTALL_SKILL=1` to opt in or `=0` to opt out.
+
+### Install the skills
+
+The CLI installs skills into **every agent harness it detects on the machine**. The supported harnesses are Claude Code, Cursor, Windsurf, Copilot, Antigravity, Gemini CLI, Cline, Codex, Pi, OpenCode and Junie.
+
+```bash frame="terminal"
+neo4j-cli skill install                       # the CLI's own skill, into every detected harness
+neo4j-cli skill install neo4j-cypher-skill    # one catalog skill (here: Cypher)
+neo4j-cli skill install --all                 # the CLI's own skill plus every catalog skill
+neo4j-cli skill install --agent claude-code   # limit any install to one harness
+
+neo4j-cli skill list                          # which skill is installed in which harness
+neo4j-cli skill check                         # report drift from the source versions
+neo4j-cli skill remove neo4j-cypher-skill     # remove one skill
+```
+
+Notes for the team:
+
+- **Two kinds of skill.** The CLI's *own* skill teaches the agent how to drive `neo4j-cli`. The *catalog* skills come from the `neo4j-contrib/neo4j-skills` repository (Cypher, modelling, drivers, GraphRAG, GDS, imports, CLI tools and more). The `neo4j-cypher-skill` and `neo4j-cli-tools-skill` are good starting points. Installing everything costs agent context, so start small.
+- **Scope it.** If you use more than one harness, use `--agent` so a skill lands only where you want it. Check the result with `skill list`.
+- **From inside a harness or a script, add `--rw`.** The CLI gates write operations, and treats agent harnesses and non-interactive shells as needing an explicit `--rw`. Typing at a terminal prompt does not need it.
+- **Start a new harness session afterwards** so it picks up the new skills.
+- **Updates.** `neo4j-cli update` refreshes the binary, and refreshes any installed skill bundles after a successful update.
+
+Skills are knowledge only. They do not give the agent a database. That is step 8.
+
+Prefer not to install a CLI? The same catalog installs through other routes:
+
+```bash frame="terminal" title="Without neo4j-cli"
+npx skills add neo4j-contrib/neo4j-skills                      # all skills, auto-detects your harness
+npx skills add neo4j-contrib/neo4j-skills/neo4j-cypher-skill   # a single skill
+gemini extensions install https://github.com/neo4j-contrib/neo4j-skills
+```
+
+For Claude Code, inside the harness:
+
+```text
+/plugin marketplace add https://github.com/neo4j-contrib/neo4j-skills.git
+/plugin install neo4j-skills@neo4j-skills-marketplace
+```
+
+### Optional: let the CLI create the container
+
+`neo4j-cli` can also run a Neo4j container for you by shelling out to `docker`. It stores a generated password as a named credential, so you never type one:
+
+```bash frame="terminal"
+neo4j-cli docker create --name dev --edition community \
+  --data-dir ~/neo4j/data --logs-dir ~/neo4j/logs --wait --rw
+neo4j-cli query --credential dev 'RETURN 1 AS n'
+```
+
+Things to know before choosing this over the script in step 3:
+
+- **It defaults to Enterprise Edition** with an evaluation licence. Without `--edition community` you are not testing the setup your team will actually run, and the one-database and no-roles limits will not apply.
+- **The password is printed by default**, so a redirect or pipe will capture it. Add `--no-print-password` to suppress that.
+- **It runs whatever `docker` resolves to.** On RHEL, `alias docker=podman` is enough.
+- **I did not find an APOC option on this command.** The README does not show one, so check `neo4j-cli docker create --help`. For a pinned version and APOC, use the script in step 3.
+
+## 8. Connect the agent harness, and the read-only gap
+
+Use these connection details:
+
+```text
+URI       neo4j://127.0.0.1:7687
+User      neo4j
+Database  neo4j
+Password  (the one you set in step 3)
+```
+
+`neo4j://` is the default scheme in both `neo4j-cli` and the Neo4j skills docs. For a single instance, `bolt://` works equally well. Keep the password in your secrets store or a git-ignored env file, never in a repository.
+
+### Store the connection in the CLI
+
+```bash frame="terminal"
+neo4j-cli credential dbms add --name local \
+  --uri neo4j://127.0.0.1:7687 --username neo4j --password "$NEO4J_PASSWORD"
+neo4j-cli credential dbms use local          # make it the default
+neo4j-cli query 'RETURN 1 AS n'              # now connects with no flags
+```
+
+Using `"$NEO4J_PASSWORD"` (exported in step 3) keeps the literal password out of your shell history. The CLI keeps stored credentials in a `credentials.json` file in your OS config directory, so treat that file as a secret.
+
+:::note[Environment variables are ignored by default]
+For safety, `neo4j-cli` does not read `NEO4J_URI`, `NEO4J_USERNAME` and `NEO4J_PASSWORD` unless you opt in with `neo4j-cli config set accept-env-vars true --rw`. Explicit flags, `.env` files and stored credentials are not affected by that setting. This matters if a skill or harness expects those variables.
+:::
+
+:::caution[The CLI keeps a command history]
+History recording is on by default. It redacts known secret flags, but it stores the Cypher text and `--param` values largely **unredacted**, and the history is designed to be readable by agents. Do not put secrets in Cypher run through the CLI, for example `CREATE USER ... SET PASSWORD '...'`. To turn recording off, run `neo4j-cli config set history-enabled false --rw`.
+:::
+
+### There is no read-only role in Community Edition
+
+In the PostgreSQL guide you created `harness_ro`. **You cannot do that here.** CE has no roles, and `CREATE ROLE`, `GRANT ROLE` and privilege commands are rejected. Creating a second user gives no protection, because every CE user has implied administrator privileges.
+
+So anything connecting with these credentials can read **and change or delete** the whole graph. Your realistic options:
+
+| Option | How it works | Trade-off |
+|---|---|---|
+| **A read-only twin instance** | Run a second container from a **copy** of the data with `NEO4J_server_databases_default__to__read__only=true`, and point the agent at that one. | Real enforcement, but the copy goes stale and you must manage it. Two servers cannot share one `data` folder. |
+| **Make the whole instance read-only** | Same setting on your only instance. | Safe for the agent, but you cannot write either. |
+| **Disposable data only** | Point the agent at a throwaway instance holding data you can rebuild, and keep dumps. | No enforcement. It limits the damage instead. |
+| **Client-side guard** | Use the driver's read access mode, or any read-only mode in the agent skill. | Not a security boundary. The client chooses the mode. |
+| **CLI write gate** | `neo4j-cli query` checks the Cypher with `EXPLAIN` first and blocks mutating statements unless you pass `--rw`. Agent harnesses must pass `--rw` explicitly to write. | A guard in the CLI, not the server. Anything else holding the same credentials (a driver, the Browser, an MCP server) bypasses it. Writes hidden inside APOC procedures that run a query string may not be visible to an `EXPLAIN` check. That last point is my inference, not something I tested, so test it before relying on it. |
+| **MCP read-only mode** | If the harness reaches Neo4j through the Neo4j Cypher MCP server, setting `NEO4J_READ_ONLY=true` removes its write tool. | Same limit: it constrains the tool, not the database. |
+| **Enterprise Edition** | Provides roles, privileges and a built-in `reader` role. | Requires a commercial licence. |
+
+:::danger
+Treat any CE connection given to an agent as a **read-write admin connection**. Do not point it at a graph you cannot afford to lose without a recent dump.
+:::
+
+## Appendix: native install (the manual dance)
+
+Prefer this only if you cannot use containers. Install Neo4j Community from the official Linux packages (follow Neo4j's Linux installation guide for RHEL or Debian-family systems), start it once, then:
+
+```bash frame="terminal" title="Package install paths. Confirm with ls on your system."
+# Config:   /etc/neo4j/neo4j.conf   (and /etc/neo4j/apoc.conf for APOC settings)
+# Shipped:  /var/lib/neo4j/labs/    (APOC Core jar lives here, NOT in plugins)
+# Loaded:   /var/lib/neo4j/plugins/ (anything here loads at startup)
+ls /var/lib/neo4j/labs /var/lib/neo4j/plugins
+```
+
+For a tarball install the same folders sit under `NEO4J_HOME` (`labs/`, `plugins/`, `conf/`).
+
+```bash frame="terminal" title="Half 1: move the jar"
+sudo cp /var/lib/neo4j/labs/apoc-*-core.jar /var/lib/neo4j/plugins/
+sudo chown neo4j:neo4j /var/lib/neo4j/plugins/apoc-*-core.jar
+```
+
+```text title="/etc/neo4j/neo4j.conf  (Half 2: permission)"
+# Append this line. Uncomment/edit rather than duplicate if it already exists.
+dbms.security.procedures.unrestricted=apoc.*
+```
+
+```bash frame="terminal" title="Restart, then verify"
+sudo systemctl enable --now neo4j
+sudo systemctl restart neo4j           # plugins load only at startup
+cypher-shell -u neo4j "RETURN apoc.version();"
+```
+
+On a fresh native install the default login is `neo4j` / `neo4j`, and you are forced to change it on first login. On WSL, make sure systemd is enabled first (see the PostgreSQL guide).
+
+:::caution[Strict config validation]
+Neo4j refuses to start if `neo4j.conf` contains a setting it does not recognise. If it fails after you add an `apoc.*` setting there, move that setting to `apoc.conf`.
+:::
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `Unsupported administration command: CREATE DATABASE` | CE supports a single user database | Use the default `neo4j` database. Separate graphs need labels or separate instances. |
+| `Unsupported administration command: CREATE ROLE` (or `GRANT ROLE`) | CE has no roles | See the read-only table in step 8 |
+| `apoc.version` says the procedure does not exist | Jar missing from plugins, or server not restarted, or jar and Neo4j versions differ | `ls ~/neo4j/plugins`, match the versions exactly, recreate the container |
+| APOC procedure errors mentioning it is sandboxed or restricted | `dbms.security.procedures.unrestricted` not set | Add the setting (step 3) and recreate or restart |
+| Fails to start: password must be at least 8 characters | `NEO4J_AUTH` password too short | Use 8 or more characters |
+| New password ignored | `NEO4J_AUTH` only applies to an empty `data/` folder | Use `ALTER CURRENT USER` (step 5) |
+| Permission denied on `/data` or `/plugins` | Folder ownership, or SELinux on RHEL | Keep `--user`, use `:Z` on RHEL (the script does), or on rootless Podman keep `--userns=keep-id` |
+| Fails to start after adding a setting | Unrecognised key in config, or wrong env var spelling | Check the underscore-doubling rule in step 3. Read `docker logs neo4j-ce`. |
+| Port already in use | Another Neo4j or service on 7474 or 7687 | Change the left side of `--publish`, for example `127.0.0.1:7475:7474` |
+| `neo4j-cli query` refuses a write | Write gate: `--rw` is required from an agent harness or script | Add `--rw` deliberately, or leave it off to keep the session read-only |
+| `neo4j-cli` ignores `NEO4J_URI` and related variables | Credential environment variables are ignored unless `accept-env-vars` is enabled | Use a stored credential (step 8) or enable the setting |
+| A skill showed up in a harness you did not intend | `skill install` targets every detected harness | Re-run with `--agent <name>`, and check with `neo4j-cli skill list` |
+| `neo4j-cli docker create` gave you Enterprise | The command defaults to Enterprise with an evaluation licence | Delete it and recreate with `--edition community` |
+
+## Quick reference
+
+```bash frame="terminal" title="Everyday commands (replace docker with podman if needed)"
+docker logs -f neo4j-ce
+docker exec -it neo4j-ce cypher-shell -u neo4j
+docker stop neo4j-ce && docker start neo4j-ce
+```
+
+```bash frame="terminal" title="neo4j-cli"
+neo4j-cli skill install --agent claude-code   # install the CLI's own skill into one harness
+neo4j-cli skill list                          # installed skills per harness
+neo4j-cli skill check                         # drift from source versions
+neo4j-cli query 'RETURN 1 AS n'               # add --rw to allow writes
+```
+
+```cypher title="Inside cypher-shell"
+RETURN apoc.version();     // confirm APOC is loaded
+SHOW DATABASES;            // neo4j and system, nothing else in CE
+SHOW USERS;                // roles column is empty in CE
+:exit
+```

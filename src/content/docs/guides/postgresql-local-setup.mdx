@@ -1,0 +1,281 @@
+---
+title: Set up PostgreSQL on a workstation
+description: Install PostgreSQL on RHEL or Ubuntu (including WSL), create your own role, and create a read-only role for the Postgres skill.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+This guide gets a local PostgreSQL server running on a workstation (native Linux or WSL) and creates two database roles:
+
+1. **A personal role** for you, with the privileges you need for day-to-day development.
+2. **A read-only role** for the connection the Postgres skill in the agent harness uses, so it can inspect and query data but never change it.
+
+Pick your distro in any tab below. The choice is remembered for the rest of the page.
+
+## Before you start: two things called "postgres"
+
+New to Postgres? This is the part that trips up almost everyone.
+
+| | What it is | Where it lives |
+|---|---|---|
+| **OS user `postgres`** | A Linux account created by the package. The server process runs as this user and owns the data directory. | The operating system (`/etc/passwd`) |
+| **Database role `postgres`** | The initial superuser *inside* the database. A role is Postgres's word for a user or a group. | The database (`pg_roles`) |
+
+They share a name by convention, but they are separate things. The link between them is **peer authentication**: when you connect over the local Unix socket, Postgres checks that your OS username matches the role name you are asking for. That is why this works with no password:
+
+```bash title="Become the OS user postgres, then connect as the role postgres"
+sudo -u postgres psql
+```
+
+`sudo -u postgres` switches your shell to the OS user `postgres`. `psql` then connects as the role of the same name, and peer authentication approves it.
+
+:::note[Why create a role named after your own login?]
+If you create a role with the same name as your OS username, plain `psql` works for you with no `sudo` and no password, using the same peer mechanism. Step 5 does this.
+:::
+
+## 1. Install the server
+
+<Tabs syncKey="distro">
+  <TabItem label="RHEL">
+    ```bash frame="terminal" title="RHEL / Rocky / Alma / Fedora"
+    # Install server and client tools
+    sudo dnf install -y postgresql-server
+
+    # RHEL does NOT create the data directory for you. Do this once.
+    sudo postgresql-setup --initdb
+    ```
+
+    :::tip
+    On RHEL 8 and 9 the default version may be older than you want. List the available versions with `dnf module list postgresql`, then pick one **before** installing, for example `sudo dnf module enable -y postgresql:16`.
+    :::
+  </TabItem>
+  <TabItem label="Ubuntu / Debian">
+    ```bash frame="terminal" title="Ubuntu / Debian"
+    sudo apt update
+    sudo apt install -y postgresql
+
+    # Nothing else to do: Debian-family packages create and start
+    # a default cluster automatically.
+    ```
+  </TabItem>
+</Tabs>
+
+## 2. Start the service
+
+<Tabs syncKey="distro">
+  <TabItem label="RHEL">
+    ```bash frame="terminal"
+    # enable = start on every boot, --now = also start right now
+    sudo systemctl enable --now postgresql
+    sudo systemctl status postgresql
+    ```
+  </TabItem>
+  <TabItem label="Ubuntu / Debian">
+    ```bash frame="terminal"
+    sudo systemctl enable --now postgresql
+    pg_lsclusters   # shows version, port (5432) and status (online)
+    ```
+  </TabItem>
+</Tabs>
+
+:::caution[WSL: check that systemd is enabled]
+If `systemctl` reports that systemd is not running, add the following to `/etc/wsl.conf`, then run `wsl --shutdown` from Windows PowerShell and reopen your distro.
+
+```ini title="/etc/wsl.conf"
+[boot]
+systemd=true
+```
+
+Without systemd you can still start the server by hand with `sudo service postgresql start` (Ubuntu), but it will not start automatically when WSL launches.
+:::
+
+## 3. Verify the server works
+
+```bash frame="terminal"
+sudo -u postgres psql -c "SELECT version();"
+```
+
+If you see a version string, the server is running and peer authentication is working.
+
+## 4. Find and edit the config files
+
+Two files control most setup problems. Their locations differ by distro, so ask the server where they are instead of guessing:
+
+```bash frame="terminal"
+sudo -u postgres psql -At -c "SHOW config_file;" -c "SHOW hba_file;"
+```
+
+Typical locations:
+
+<Tabs syncKey="distro">
+  <TabItem label="RHEL">
+    ```text
+    /var/lib/pgsql/data/postgresql.conf
+    /var/lib/pgsql/data/pg_hba.conf
+    ```
+  </TabItem>
+  <TabItem label="Ubuntu / Debian">
+    ```text
+    /etc/postgresql/<version>/main/postgresql.conf
+    /etc/postgresql/<version>/main/pg_hba.conf
+    ```
+  </TabItem>
+</Tabs>
+
+| File | Controls | Do you need to edit it? |
+|---|---|---|
+| `postgresql.conf` | Server settings: port, which network addresses to listen on, memory | Usually **no**. The default `listen_addresses = 'localhost'` is what you want on a workstation. |
+| `pg_hba.conf` | **Who may connect, from where, and how they prove it** ("host-based authentication") | **Often yes**, for password logins over TCP. |
+
+`pg_hba.conf` is read top to bottom and the **first matching line wins**. Make sure these lines exist, and that nothing earlier in the file matches first with a different method:
+
+```text title="pg_hba.conf" {3-4}
+# TYPE  DATABASE  USER  ADDRESS        METHOD
+local   all       all                  peer             # Unix socket: OS user must match role
+host    all       all   127.0.0.1/32   scram-sha-256    # TCP over IPv4: password required
+host    all       all   ::1/128        scram-sha-256    # TCP over IPv6: password required
+```
+
+The highlighted lines matter for the Postgres skill. Tools connect over TCP (`127.0.0.1`), not the Unix socket, so they need a password-based method. Some RHEL versions default these lines to `ident`, which tries to match OS usernames and fails for a role like `harness_ro`. Change `ident` to `scram-sha-256`.
+
+Apply the change. A reload is enough for `pg_hba.conf`, and no restart is needed:
+
+```bash frame="terminal"
+sudo systemctl reload postgresql
+```
+
+:::note
+Changes to `listen_addresses` or `port` in `postgresql.conf` **do** require `sudo systemctl restart postgresql`.
+:::
+
+## 5. Create your personal role and database
+
+```bash frame="terminal" title="Run as your normal login, not as postgres"
+# Create a role named after your OS user, allowed to log in and create databases.
+# --pwprompt asks for a password so you can also connect over TCP.
+sudo -u postgres createuser --createdb --pwprompt "$USER"
+
+# Create a database with the same name, owned by you.
+# This makes a bare `psql` work with no arguments.
+sudo -u postgres createdb --owner="$USER" "$USER"
+
+# Test: no sudo, no password, over the Unix socket
+psql -c "SELECT current_user;"
+```
+
+:::caution[Superuser is optional, and only for a throwaway dev box]
+`createuser --superuser "$USER"` bypasses all permission checks. It is convenient on a personal sandbox, but avoid it if the instance holds anything you care about. `--createdb` is enough for most day-to-day work.
+:::
+
+Now create the database the project will use. Substitute your own name for `appdb`:
+
+```bash frame="terminal"
+createdb appdb
+```
+
+You own it because you created it.
+
+## 6. Create the read-only role for the Postgres skill
+
+Connect to the target database as yourself, then run the SQL below. Use `psql appdb`, because `GRANT` on tables is per-database.
+
+```bash frame="terminal"
+psql appdb
+```
+
+```sql title="Run inside psql, connected to appdb" {1,8,10}
+-- 1. The login. Use \password afterwards to set it, so the password
+--    never lands in your shell history or in server logs.
+CREATE ROLE harness_ro WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
+\password harness_ro
+
+-- 2. Let it connect to this database, and look inside the schema.
+GRANT CONNECT ON DATABASE appdb TO harness_ro;
+GRANT USAGE ON SCHEMA public TO harness_ro;
+
+-- 3. SELECT on every table that exists right now.
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO harness_ro;
+
+-- 4. SELECT on tables created LATER by your role (see warning below).
+ALTER DEFAULT PRIVILEGES FOR ROLE your_role_name IN SCHEMA public
+  GRANT SELECT ON TABLES TO harness_ro;
+
+-- 5. Belt and braces: even if someone later grants it too much,
+--    every session from this role is read-only.
+ALTER ROLE harness_ro SET default_transaction_read_only = on;
+```
+
+:::caution[Replace `your_role_name`]
+`ALTER DEFAULT PRIVILEGES` only applies to objects created by the role you name. Use the role that creates your tables (usually your personal role from step 5). If migrations run as a different role, repeat the statement for that role, or new tables will be invisible to `harness_ro`.
+:::
+
+:::tip[Shortcut on PostgreSQL 14 and newer]
+A built-in role covers steps 2 to 4 across **all** schemas, including future tables:
+
+```sql
+GRANT pg_read_all_data TO harness_ro;
+```
+
+It is broader than the explicit grants above (it also reads every other schema), so use the explicit version if you want the role confined to `public`.
+:::
+
+### Test it
+
+```bash frame="terminal"
+# Reading should work...
+psql "postgresql://harness_ro@127.0.0.1:5432/appdb" -c "SELECT count(*) FROM information_schema.tables;"
+
+# ...writing must fail with "permission denied" or "read-only transaction"
+psql "postgresql://harness_ro@127.0.0.1:5432/appdb" -c "CREATE TABLE should_fail (id int);"
+```
+
+If both behave as described, the role is set up correctly. Psql will prompt for the password.
+
+## 7. Give the connection to the Postgres skill
+
+Configure the skill with this connection string, or the equivalent host, port, database, user and password settings (check the skill's own documentation for the exact variable names):
+
+```text
+postgresql://harness_ro:<password>@127.0.0.1:5432/appdb
+```
+
+To avoid typing the password repeatedly in psql, you can store it in `~/.pgpass`:
+
+```bash frame="terminal"
+# Format: host:port:database:user:password
+echo '127.0.0.1:5432:appdb:harness_ro:<password>' >> ~/.pgpass
+chmod 600 ~/.pgpass   # psql ignores the file if permissions are looser
+```
+
+:::danger
+Never commit connection strings or `.pgpass` contents to a repository. Keep the password in your secrets store or a git-ignored env file.
+:::
+
+## Troubleshooting
+
+| Error | Likely cause | Fix |
+|---|---|---|
+| `Peer authentication failed for user "x"` | Connecting over the socket as a role whose name differs from your OS user | Use `sudo -u postgres psql`, or connect over TCP with `-h 127.0.0.1` |
+| `Ident authentication failed` | `pg_hba.conf` TCP line uses `ident` | Change to `scram-sha-256` and reload (step 4) |
+| `password authentication failed` | Wrong password, or role has none | `\password role_name` inside psql as an admin |
+| `connection refused` | Server not running, or WSL without systemd | Step 2 and the WSL note |
+| `permission denied for table ...` | Read-only role missing a grant | Re-run the `GRANT` statements in step 6 |
+| New table is invisible to `harness_ro` | `ALTER DEFAULT PRIVILEGES` named the wrong creator role | Re-run it with the correct `FOR ROLE`, then `GRANT SELECT ON ALL TABLES` once for existing tables |
+| `could not change directory to "/home/you"` warning | Harmless side effect of `sudo -u postgres` from your home folder | Ignore it, or `cd /tmp` first |
+
+## Quick reference
+
+```bash frame="terminal" title="Everyday commands"
+sudo -u postgres psql          # admin shell as the role postgres
+psql appdb                     # your own shell, in a given database
+sudo systemctl reload postgresql   # after editing pg_hba.conf
+sudo systemctl restart postgresql  # after editing postgresql.conf
+```
+
+```text title="Inside psql"
+\l      list databases
+\du     list roles
+\dt     list tables
+\c db   switch database
+\q      quit
+```

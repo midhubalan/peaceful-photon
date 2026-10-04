@@ -14,6 +14,9 @@ export default defineConfig({
 					items: [
 						// Each item here is one entry in the navigation menu.
 						{ label: 'Example Guide', slug: 'guides/example' },
+						{ label: 'Posgres Setup Guide', slug: 'guides/postgresql-local-setup' },
+						{ label: 'Neo4j Setup Guide', slug: 'guides/neo4j-community-local-setup' },
+						{ label: 'WSL Keyring Setup Guide', slug: 'guides/wsl-keyring-setup' },
 					],
 				},
 				{
