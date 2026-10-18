@@ -1,3 +1,38 @@
+# debian 
+su - postgres
+history
+    1  pg_ctl
+    2  ls /usr/lib/postgresql/18/bin/pg_ctl --help
+    3  /usr/lib/postgresql/18/bin/pg_ctl --help
+    4  pg_lsclusters
+    5  echo $PGDATA
+    6  ls /var/lib/postgresql/18/main
+    7  initdb /var/lib/postgresql/18/main
+    8  /usr/lib/postgresql/18/bin/initdb -D /var/lib/postgresql/18/main/
+    9  echo $PGDATA
+   10  exit
+   11  psql
+   12  echo $PGDATA
+   13  oid2name
+   14  apt search oid2name
+   15  apt search postgresql-contrib-18
+   16  apt search postgresql-contrib
+   17  pwd
+   18  ls -la
+   19  ls /usr/lib/postgresql/18/bin
+   20  ls -la /usr/lib/postgresql/18/bin
+   21  ls -la /usr/lib/postgresql/18/lib
+   22  psql -l 
+   23  /usr/lib/postgresql/18/bin/oid2name -s
+   24  pwd
+   25  ls
+   26  ls $(pwd)18/main/
+   27  ls $(pwd)/18/main/
+   28  ls $(pwd)/18/
+   29  ls /etc/postgresql/18/main/pg_hba.conf 
+   30  cat /etc/postgresql/18/main/pg_hba.conf 
+   31  history
+---
 # RHEL 10
 su - postgres
 history
