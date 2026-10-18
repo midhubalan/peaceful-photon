@@ -1,0 +1,57 @@
+# RHEL 10
+su - postgres
+history
+    1  psql
+    2  exit
+    3  psql
+    4  exit
+    5  pg_ctl status
+    6  which pg_ctl
+    7  pg_ctl status
+    8  pg_ctl stop
+    9  pg_ctl status
+   10  echo $PGDATA
+   11  pwd
+   12  pg_ctl start
+   13  ls
+   14  ps --help
+   15  ps 1677260
+   16  ps aux 1677260
+   17  ps aux | grep 1677260
+   18  pg_ctl status
+   19  ps 1677260
+   20  pg_ctl stop -m smart
+   21  pstree -p postgres
+   22  pg_ctl start
+   23  pstree -p postgres
+   24  ps -C postgres -af
+   25  psql &
+   26  ps -C postgres -af
+   27  ps 1690899
+   28  ps aux | grep psql
+   29  pstree 1690899
+   30  id
+   31  psql -U midhu -d onlinestore
+   32  psql -l
+   33  psql -U midhu -d midhu
+   34  psql
+   35  echo $EDITOR
+   36  cat /var/lib/pgsql/data/postgresql.conf 
+   37  less /var/lib/pgsql/data/pg_hba.conf 
+   38  ls -la /var/lib/pgsql/data/base/
+   39  ls -la /var/lib/pgsql/data/base/16389/ | wc -l
+   40  ls -la /var/lib/pgsql/data/base/16389/ | head
+   41  ls -lai /var/lib/pgsql/data/base/16389/ | head
+   42  oid2name
+   43  oid2name -d midhu -f 1247*
+   44  oid2name -d midhu -f '1247*'
+   45  oid2name -d midhu -f 1247
+   46  ls -lai /var/lib/pgsql/data/base/16389/ | head
+   47  oid2name -d midhu -f 113
+   48  ls -la /var/lib/pgsql/
+   49  ls -la /var/lib/pgsql/data/
+   50  ls -la /var/lib/pgsql/data/pg_tblspc/
+   51  oid2name -s
+   52  cat /var/lib/pgsql/data/postgresql.auto.conf 
+   53  echo $PGDATA
+   54  history
