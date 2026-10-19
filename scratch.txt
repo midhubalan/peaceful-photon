@@ -1,3 +1,40 @@
+# catalog functions relevant for cluster config
+pg_hba_file_rules
+pg_roles
+pg_authid
+
+# cli relevant for cluster management
+pg_ctl
+initdb
+createdb
+createuser
+dropuser
+
+# psql commands
+
+\drg
+\l
+\c
+\dt 
+\du
+
+# SQL statement
+CREATE ROLE group_role WITH NOLOGIN;
+CREATE ROLE user_role WITH LOGIN PASSWORD 'xxx' IN ROLE group_role;
+
+GRANT  group_role TO user_role;
+
+CREATE ROLE group_role2 WITH NOLOGIN ADMIN user_role;
+
+GRANT group_role2  TO user_role WITH ADMIN OPTION;
+REVOKE 
+
+-- postgres or superuser only
+SELECT rolname, rolcanlogin, rolconnlimit, rolpassword FROM pg_authid WHERE rolname = "user_role";
+-- normal user
+SELECT rolname, rolcanlogin, rolconnlimit, rolpassword FROM pg_roles WHERE rolname = (SELECT current_user);
+#
+
 # debian 
 su - postgres
 history
