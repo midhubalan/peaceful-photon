@@ -1,3 +1,15 @@
+postgres=# create database myforumdb;
+CREATE DATABASE
+postgres=# \c myforumdb
+You are now connected to database "myforumdb" as user "postgres".
+myforumdb=# create user myforum with password 'SuperSecret' login;
+CREATE ROLE
+myforumdb=# create schema myforum authorization myforum;
+CREATE SCHEMA
+postgres@learn_postgresql:/$ psql -U myforum myforumdb
+myforumdb=>
+myforumdb=> create table mytable(id integer);
+CREATE TABLE
 # catalog functions relevant for cluster config
 pg_hba_file_rules
 pg_roles
@@ -17,6 +29,8 @@ dropuser
 \c
 \dt 
 \du
+\x
+\l+ <db-name>
 
 # SQL statement
 CREATE ROLE group_role WITH NOLOGIN;
@@ -33,6 +47,9 @@ REVOKE
 SELECT rolname, rolcanlogin, rolconnlimit, rolpassword FROM pg_authid WHERE rolname = "user_role";
 -- normal user
 SELECT rolname, rolcanlogin, rolconnlimit, rolpassword FROM pg_roles WHERE rolname = (SELECT current_user);
+
+select pg_database_size('forumdb');
+
 #
 
 # debian 
