@@ -52,6 +52,41 @@ select pg_database_size('forumdb');
 
 #
 
+- Temporary tables scoped to Session
+      create temp table if not exists temp_users_transaction (
+      pk int GENERATED ALWAYS AS IDENTITY
+      ,username text NOT NULL
+      ,gecos text
+      ,email text NOT NULL
+      ,PRIMARY KEY(pk)
+      ,UNIQUE (username)
+      );
+
+
+- Temporary tables scoped to transaction
+
+      begin work;
+      create temp table if not exists temp_users_transaction (
+      pk int GENERATED ALWAYS AS IDENTITY
+      ,username text NOT NULL
+      ,gecos text
+      ,email text NOT NULL
+      ,PRIMARY KEY(pk)
+      ,UNIQUE (username)
+      ) on commit drop;
+
+- unlogged tables
+      create unlogged table if not exists unlogged_users (
+      pk int GENERATED ALWAYS AS IDENTITY
+      ,username text NOT NULL
+      ,gecos text
+      ,email text NOT NULL
+      ,PRIMARY KEY(pk)
+      ,UNIQUE(username)
+      );
+~
+- logged tables
+
 # debian 
 su - postgres
 history
